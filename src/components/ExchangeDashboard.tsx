@@ -31,15 +31,19 @@ interface ExchangeDashboardProps {
   initialCrops: CropPrice[];
   latestDate: string;
   isMock: boolean;
+  initialCity?: string;
+  initialCategory?: string;
 }
 
 export default function ExchangeDashboard({
   initialCrops,
   latestDate,
   isMock,
+  initialCity = "الكل",
+  initialCategory = "الكل",
 }: ExchangeDashboardProps) {
-  const [selectedCity, setSelectedCity] = useState<string>("الكل");
-  const [selectedCategory, setSelectedCategory] = useState<string>("الكل");
+  const [selectedCity, setSelectedCity] = useState<string>(initialCity);
+  const [selectedCategory, setSelectedCategory] = useState<string>(initialCategory);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
   const [showSharePreview, setShowSharePreview] = useState<boolean>(false);

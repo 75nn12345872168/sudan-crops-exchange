@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans_Arabic } from "next/font/google";
+import { getSiteUrl } from "@/lib/site";
 import "./globals.css";
 
 const ibmPlexArabic = IBM_Plex_Sans_Arabic({
@@ -16,10 +17,51 @@ const ibmPlexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+const SITE_TITLE =
+  "أسعار المحاصيل اليوم في السودان | بورصة القضارف للذرة والسمسم والدخن";
+const SITE_DESCRIPTION =
+  "متابعة يومية محدثة لأسعار الذرة اليوم في القضارف (سعر أردب الفتريتة والدبر والعكر والدخن)، وسعر قنطار السمسم الأبيض والتسالي وزهرة الشمس، مع كميات الوارد بالجوال في بورصة المحاصيل السودانية وسوق محصول القضارف وبورتسودان والأبيض وتندلتي.";
+
 export const metadata: Metadata = {
-  title: "بورصة المحاصيل الزراعية في السودان - القضارف | Sudan Crops Exchange",
-  description:
-    "منصة متابعة الأسعار اليومية والوارد للمحاصيل الزراعية في السودان: القضارف، بورتسودان صادر، الأبيض، وتندلتي (الذرة، السمسم، الدخن، التسالي، الفول السوداني).",
+  metadataBase: new URL(getSiteUrl()),
+  title: SITE_TITLE,
+  description: SITE_DESCRIPTION,
+  keywords: [
+    "أسعار الذرة اليوم في القضارف",
+    "سعر أردب الفتريتة والدبر",
+    "سعر قنطار السمسم الأبيض",
+    "بورصة المحاصيل السودانية",
+    "سوق محصول القضارف",
+    "أسعار المحاصيل اليوم في السودان",
+    "سعر الدخن في القضارف",
+    "سعر التسالي في السودان",
+    "بورصة القضارف",
+  ],
+  alternates: {
+    canonical: "/",
+  },
+  openGraph: {
+    type: "website",
+    locale: "ar_SD",
+    siteName: "بورصة المحاصيل الزراعية في السودان - القضارف",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    url: "/",
+    images: [
+      {
+        url: "/og-image.png",
+        width: 1200,
+        height: 630,
+        alt: "أسعار المحاصيل اليوم في السودان — بورصة القضارف للذرة والسمسم والدخن",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    images: ["/og-image.png"],
+  },
 };
 
 export default function RootLayout({
