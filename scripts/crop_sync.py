@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Sudan Crops Exchange - Automated Crop Prices Scraper & Sync
-Fetches daily market prices from https://souq.mib-sd.com/ (Gadarif Crops Market)
-and upserts normalized records into Supabase `crop_prices` table.
+Sudan Crops Exchange - Automated Crop Prices Scraper, Sync & Telegram Publisher
+Fetches daily market prices from https://souq.mib-sd.com/ (Gadarif Crops Market),
+upserts normalized records into Supabase `crop_prices`, and publishes a formatted
+Arabic summary to the Telegram channel.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -21,6 +23,7 @@ from dotenv import load_dotenv
 
 SOURCE_URL = "https://souq.mib-sd.com/"
 SOURCE_NAME = "souq.mib-sd.com"
+PLATFORM_URL = "https://sudan-crops-exchange.vercel.app"
 DEFAULT_CITY = "القضارف"
 DEFAULT_CURRENCY = "SDG"
 
@@ -89,6 +92,8 @@ def infer_category(crop_name: str, section_title: str = "") -> str:
         return "تسالي"
     if any(k in name_norm for k in ("سمسم", "زهرة", "فول سوداني", "كركدي")):
         return "محاصيل زيتية"
+    if "صمغ" in name_norm:
+        return "صمغ عربي"
     if "سمسم" in section_norm or "زهرة" in section_norm:
         return "محاصيل زيتية"
     return "حبوب"
@@ -119,7 +124,6 @@ def extract_crop_name(cell: Any) -> str:
     if link:
         return " ".join(link.get_text(" ", strip=True).split())
 
-    # Remove auxiliary .chip badges if no <a> tag is present
     parts: list[str] = []
     for child in cell.children:
         if getattr(child, "name", None) and "chip" in (child.get("class") or []):
@@ -148,7 +152,6 @@ def map_column_indices(headers: list[str]) -> dict[str, int]:
         elif "الوارد" in h_clean:
             mapping["arrivals_sacks"] = idx
 
-    # Positional fallback matching souq.mib-sd.com standard 6-column table
     defaults = {
         "crop_name": 0,
         "unit": 1,
@@ -170,7 +173,6 @@ def parse_souq_html(html_text: str) -> list[dict[str, Any]]:
 
     tables = soup.select("table.ptbl") or soup.find_all("table")
     for table in tables:
-        # Locate enclosing card header <h3> for category context
         section_title = ""
         card = table.find_parent("div", class_="card")
         if card:
@@ -251,11 +253,8 @@ def fetch_live_html(url: str = SOURCE_URL) -> str:
     return response.text
 
 
-def upsert_to_supabase(records: list[dict[str, Any]]) -> int:
-    """Upsert extracted crop records into Supabase `crop_prices` table."""
-    if not records:
-        return 0
-
+def get_supabase_client() -> Any:
+    """Create an authenticated Supabase service_role client from environment variables."""
     load_dotenv()
     supabase_url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -267,13 +266,167 @@ def upsert_to_supabase(records: list[dict[str, Any]]) -> int:
 
     from supabase import create_client
 
-    client = create_client(supabase_url, service_key)
+    return create_client(supabase_url, service_key)
+
+
+def upsert_to_supabase(records: list[dict[str, Any]], client: Any | None = None) -> int:
+    """Upsert extracted crop records into Supabase `crop_prices` table."""
+    if not records:
+        return 0
+
+    sb_client = client or get_supabase_client()
     result = (
-        client.table("crop_prices")
+        sb_client.table("crop_prices")
         .upsert(records, on_conflict="crop_name,market_city,recorded_date")
         .execute()
     )
     return len(result.data) if getattr(result, "data", None) is not None else len(records)
+
+
+def fetch_latest_gadarif_from_supabase(client: Any | None = None) -> list[dict[str, Any]]:
+    """Fetch the latest available price record per crop for Gadarif from Supabase."""
+    sb_client = client or get_supabase_client()
+    response = (
+        sb_client.table("crop_prices")
+        .select("*")
+        .eq("market_city", DEFAULT_CITY)
+        .order("recorded_date", desc=True)
+        .order("created_at", desc=True)
+        .limit(100)
+        .execute()
+    )
+    rows = getattr(response, "data", None) or []
+    latest_by_crop: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row.get("crop_name") or "").strip()
+        if name and name not in latest_by_crop:
+            latest_by_crop[name] = row
+    return list(latest_by_crop.values())
+
+
+def _fmt_price(value: Any) -> str:
+    try:
+        num = float(value)
+        if num <= 0:
+            return "—"
+        return f"{int(round(num)):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def format_telegram_bulletin(records: list[dict[str, Any]]) -> str:
+    """Format an Arabic HTML summary message for Telegram channel publication."""
+    dates = [str(r.get("recorded_date") or "") for r in records if r.get("recorded_date")]
+    latest_date = max(dates) if dates else datetime.now(timezone(timedelta(hours=2))).strftime("%Y-%m-%d")
+
+    category_order = ["حبوب", "محاصيل زيتية", "تسالي", "صمغ عربي"]
+    category_labels = {
+        "حبوب": "🌾 الحبوب (الذرة والدخن)",
+        "محاصيل زيتية": "🌻 المحاصيل الزيتية والنقدية",
+        "تسالي": "🍉 التسالي",
+        "صمغ عربي": "🌿 الصمغ العربي",
+    }
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for rec in records:
+        cat = str(rec.get("category") or infer_category(str(rec.get("crop_name") or ""))).strip()
+        grouped.setdefault(cat, []).append(rec)
+
+    ordered_cats = [c for c in category_order if c in grouped] + [
+        c for c in grouped if c not in category_order
+    ]
+
+    lines: list[str] = [
+        f"🌾 <b>نشرة أسعار بورصة محاصيل {html.escape(DEFAULT_CITY)} — السودان</b>",
+        f"📅 <b>التاريخ:</b> {html.escape(latest_date)}",
+        "",
+    ]
+
+    total_arrivals = 0
+    for cat in ordered_cats:
+        heading = category_labels.get(cat, f"📌 {html.escape(cat)}")
+        lines.append(f"<b>{heading}:</b>")
+        for item in grouped[cat]:
+            name = html.escape(str(item.get("crop_name") or ""))
+            unit = html.escape(str(item.get("unit") or "أردب"))
+            min_p = item.get("min_price")
+            max_p = item.get("max_price")
+            avg_p = item.get("avg_price")
+            arrivals = int(round(float(item.get("arrivals_sacks") or 0)))
+            total_arrivals += arrivals
+
+            try:
+                chg = float(item.get("change_percent") or 0)
+            except (TypeError, ValueError):
+                chg = 0.0
+
+            if min_p is not None and max_p is not None and float(max_p) > 0:
+                price_str = f"{_fmt_price(max_p)} – {_fmt_price(min_p)} ج.س"
+            elif avg_p is not None and float(avg_p) > 0:
+                price_str = f"{_fmt_price(avg_p)} ج.س"
+            else:
+                price_str = "غير متداول اليوم"
+
+            if chg > 0:
+                trend = f"🟢 +{chg:g}%"
+            elif chg < 0:
+                trend = f"🔴 {chg:g}%"
+            else:
+                trend = "⚪ 0%"
+
+            arrivals_part = f" | الوارد: {arrivals:,} جوال" if arrivals > 0 else ""
+            lines.append(f"• <b>{name}</b> ({unit}): {price_str} ({trend}){arrivals_part}")
+        lines.append("")
+
+    lines.append(f"📦 <b>إجمالي الوارد المسجل:</b> {total_arrivals:,} جوال")
+    lines.append(f"🔗 <b>التفاصيل والتحديثات المباشرة:</b>\n{PLATFORM_URL}")
+    return "\n".join(lines)
+
+
+def send_telegram_bulletin(records: list[dict[str, Any]]) -> bool:
+    """
+    Send formatted crop bulletin to Telegram channel via Bot API.
+    Wrapped in try/except so DB updates are never failed by notification issues.
+    """
+    try:
+        load_dotenv()
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        channel_id = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
+
+        if not bot_token or not channel_id:
+            print(
+                "NOTICE: Skipping Telegram publish (TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID not set).",
+                file=sys.stderr,
+            )
+            return False
+
+        if not records:
+            print("NOTICE: Skipping Telegram publish (no records available).", file=sys.stderr)
+            return False
+
+        message_text = format_telegram_bulletin(records)
+        api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        resp = requests.post(
+            api_url,
+            json={
+                "chat_id": channel_id,
+                "text": message_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram API rejected request: {data}")
+
+        msg_id = (data.get("result") or {}).get("message_id")
+        print(f"Published daily bulletin to Telegram channel {channel_id} (message_id={msg_id}).")
+        return True
+    except Exception as exc:
+        print(f"WARNING: Failed to publish bulletin to Telegram: {exc}", file=sys.stderr)
+        return False
 
 
 def main() -> int:
@@ -287,6 +440,11 @@ def main() -> int:
         help="Fetch and parse prices, print formatted JSON to stdout without writing to Supabase.",
     )
     parser.add_argument(
+        "--notify-only",
+        action="store_true",
+        help="Fetch latest Gadarif prices from Supabase and publish bulletin to Telegram.",
+    )
+    parser.add_argument(
         "--html-file",
         type=str,
         default=None,
@@ -295,6 +453,15 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if args.notify_only:
+            sb_client = get_supabase_client()
+            db_records = fetch_latest_gadarif_from_supabase(sb_client)
+            if not db_records:
+                print("WARNING: No Gadarif records found in Supabase.", file=sys.stderr)
+                return 1
+            sent = send_telegram_bulletin(db_records)
+            return 0 if sent else 1
+
         if args.html_file:
             with open(args.html_file, "r", encoding="utf-8") as fh:
                 html_text = fh.read()
@@ -316,11 +483,20 @@ def main() -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
 
-        upserted_count = upsert_to_supabase(records)
+        sb_client = get_supabase_client()
+        upserted_count = upsert_to_supabase(records, sb_client)
         print(
             f"Successfully upserted {upserted_count} crop price records "
             f"for {records[0]['recorded_date']} ({DEFAULT_CITY})."
         )
+
+        # Fetch latest Gadarif rows from DB (combines scraped + any manual admin entries)
+        try:
+            latest_db_records = fetch_latest_gadarif_from_supabase(sb_client) or records
+        except Exception:
+            latest_db_records = records
+
+        send_telegram_bulletin(latest_db_records)
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
